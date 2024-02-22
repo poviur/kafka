@@ -33,6 +33,7 @@ class KafkaSession {
   // Cluster Metadata
   Future<List<Broker>>? _brokers;
   Map<String, Future<TopicMetadata>> _topicsMetadata = Map();
+  Map<String, int> topicCounter = Map();
 
   /// Creates new session.
   ///

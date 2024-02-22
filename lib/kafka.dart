@@ -7,12 +7,14 @@ library kafka;
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:quiver/collection.dart';
 
 import 'common.dart';
 
 import 'protocol.dart';
+import 'src/util/murmur2.dart';
 
 export 'common.dart' hide groupBy, kafkaLogger;
 export 'protocol.dart' show TopicMetadata;

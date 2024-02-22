@@ -70,7 +70,7 @@ class ProduceEnvelope {
   final String topicName;
 
   /// Partition ID.
-  final int partitionId;
+  final int? partitionId;
 
   /// List of messages to publish.
   final List<Message> messages;

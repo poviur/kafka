@@ -56,7 +56,9 @@ class Producer {
     var topicNames = new Set<String>.from(messages.map((_) => _.topicName));
     var meta = await session.getMetadata(topicNames, invalidateCache: refreshMetadata);
 
-    var byBroker = new ListMultimap<Broker, ProduceEnvelope>.fromIterable(messages, key: (_) {
+    var envelopes = _preparePartitionIds(messages, meta);
+
+    var byBroker = new ListMultimap<Broker, ProduceEnvelope>.fromIterable(envelopes, key: (_) {
       var leaderId = meta.getTopicMetadata(_.topicName).getPartition(_.partitionId).leader;
       return meta.getBroker(leaderId);
     });
@@ -80,6 +82,37 @@ class Producer {
     } else {
       return result;
     }
+  }
+
+  List<ProduceEnvelope> _preparePartitionIds(List<ProduceEnvelope> envelopes, ClusterMetadata meta) {
+    List<ProduceEnvelope> newEnvelopes = [];
+    for (var envelope in envelopes) {
+      if (envelope.partitionId == null) {
+        var keys = { for (var message in envelope.messages) message.key };
+        keys.remove(null);
+        if (keys.length > 1) {
+          throw Exception('Different keys in one envelope');
+        }
+        late int partitionId;
+        var topicMeta = meta.getTopicMetadata(envelope.topicName);
+        var numPartitions = topicMeta.partitions.length;
+        if (keys.isEmpty) {
+          var availablePartitions = topicMeta.partitions.where((p) => p.leader > 0).toList();
+          var numAvailablePartitions = availablePartitions.length;
+          var counter = session.topicCounter.update(envelope.topicName, (c) => ++c & 0xffffffff, ifAbsent: () => Random().nextInt(0xffffffff));
+          partitionId = (numAvailablePartitions > 0) ? availablePartitions[counter % numAvailablePartitions].partitionId : counter % numPartitions;
+        }
+        else {
+          partitionId = (Murmur2.eval(keys.first!) & 0x7fffffff) % numPartitions;
+        }
+        newEnvelopes.add(ProduceEnvelope(envelope.topicName, partitionId, envelope.messages, compression: envelope.compression));
+      }
+      else {
+        newEnvelopes.add(envelope);
+      }
+    }
+
+    return newEnvelopes;
   }
 }
 
