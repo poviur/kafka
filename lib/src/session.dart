@@ -31,8 +31,8 @@ class KafkaSession {
   Map<Socket, Future> _flushFutures = Map();
 
   // Cluster Metadata
-  Future<List<Broker>>? _brokers;
-  Map<String, Future<TopicMetadata>> _topicsMetadata = Map();
+  List<Broker>? _brokers;
+  Map<String, TopicMetadata> _topicsMetadata = Map();
   Map<String, int> topicCounter = Map();
 
   /// Creates new session.
@@ -76,25 +76,23 @@ class KafkaSession {
 
     var topicsToFetch = topicNames.where((t) => !_topicsMetadata.keys.contains(t));
     if (topicsToFetch.length > 0) {
-      Future<MetadataResponse> responseFuture = _sendMetadataRequest(topicsToFetch.toSet(), contactPoint.host, contactPoint.port);
-      for (var name in topicsToFetch) {
-        _topicsMetadata[name] = responseFuture.then((response) {
-          return response.topics.firstWhere((_) => _.topicName == name);
-        });
-      }
-
-      _brokers = responseFuture.then((response) => response.brokers);
+      MetadataResponse response = await _sendMetadataRequest(topicsToFetch.toSet(), contactPoint.host, contactPoint.port);
+      response.topics.forEach((topic) {
+        if (topicNames.contains(topic.topicName)) {
+          _topicsMetadata[topic.topicName] = topic;
+        }
+      });
+      _brokers = response.brokers;
     }
-    List<TopicMetadata> allMetadata = await Future.wait(_topicsMetadata.values);
-    var metadata = allMetadata.where((_) => topicNames.contains(_.topicName));
-    var brokers = await _brokers;
+    List<TopicMetadata> metadata = List.unmodifiable([for(var name in topicNames) _topicsMetadata[name] ?? null].whereType<TopicMetadata>());
 
-    return ClusterMetadata(brokers!, List.unmodifiable(metadata));
+    return ClusterMetadata(_brokers ?? [], metadata);
   }
 
   Future<MetadataResponse> _sendMetadataRequest(Set<String> topics, String host, int port) async {
     var request = MetadataRequest(topics);
     MetadataResponse response = await _send(host, port, request);
+    print('metaresponse: $response');
 
     TopicMetadata? topicWithError = response.topics.firstWhereOrNull((_) => _.errorCode != KafkaServerError.NoError);
 
@@ -155,6 +153,7 @@ class KafkaSession {
   Future<dynamic> _send(String host, int port, KafkaRequest request) async {
     kafkaLogger.finer('Session: Sending request ${request} to ${host}:${port}');
     var socket = await _getSocket(host, port);
+    print('The socket: $socket');
     Completer completer = new Completer();
     _inflightRequests[request] = completer;
 
@@ -167,9 +166,21 @@ class KafkaSession {
       return socket.flush().catchError((error) {
         _inflightRequests.remove(request);
         completer.completeError(error);
+        socket.close();
         return new Future.value();
+      }).then((f) {
+        print('flush finish with $f');
+        return f;
       });
     });
+
+    completer.future.timeout(Duration(seconds: 3)).catchError((error) {
+      print('_send FF: $error');
+      if (!completer.isCompleted) {
+        completer.completeError(error);
+        _inflightRequests.remove(request);
+      }
+    }, test: (e) => e is TimeoutException);
 
     return completer.future;
   }
@@ -186,10 +197,11 @@ class KafkaSession {
   }
 
   void _handleData(String hostPort, List<int> d) {
-    var buffer = _buffers[hostPort];
+    var buffer = _buffers[hostPort]!;
 
-    buffer?.addAll(d);
-    if (buffer!.length >= 4 && _sizes[hostPort] == -1) {
+    buffer.addAll(d);
+    print('handle: ${buffer.join(',')}\r\n${String.fromCharCodes(buffer)}');
+    if (buffer.length >= 4 && _sizes[hostPort] == -1) {
       var sizeBytes = buffer.sublist(0, 4);
       var reader = new KafkaBytesReader.fromBytes(sizeBytes);
       _sizes[hostPort] = reader.readInt32();
@@ -238,6 +250,22 @@ class KafkaSession {
         _sizes[key] = -1;
         _subscriptions[key] = socket.listen((d) => _handleData(key, d));
         _flushFutures[socket] = new Future.value();
+        socket.done.then((result) {
+          print('socket.done $result');
+          _sockets.remove(key);//?.destroy();
+          _subscriptions.remove(key);//?.cancel();
+          //_flushFutures.remove(socket)?.catchError((e) {
+          //         print('final error $e');
+          //       });
+          return Future.value();
+        }, onError: (error) {
+          print('socket.done error $error');
+          _sockets.remove(key);//?.destroy();
+          _subscriptions.remove(key);//?.cancel();
+          //_flushFutures.remove(socket)?.catchError((e) {
+          //         print('final error $e');
+          //       });
+        });
       }, onError: (error) {
         _sockets.remove(key);
       });
