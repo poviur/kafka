@@ -31,8 +31,8 @@ class KafkaSession {
   Map<Socket, Future> _flushFutures = Map();
 
   // Cluster Metadata
-  Future<List<Broker>>? _brokers;
-  Map<String, Future<TopicMetadata>> _topicsMetadata = Map();
+  List<Broker>? _brokers;
+  Map<String, TopicMetadata> _topicsMetadata = Map();
   Map<String, int> topicCounter = Map();
 
   /// Creates new session.
@@ -76,20 +76,17 @@ class KafkaSession {
 
     var topicsToFetch = topicNames.where((t) => !_topicsMetadata.keys.contains(t));
     if (topicsToFetch.length > 0) {
-      Future<MetadataResponse> responseFuture = _sendMetadataRequest(topicsToFetch.toSet(), contactPoint.host, contactPoint.port);
-      for (var name in topicsToFetch) {
-        _topicsMetadata[name] = responseFuture.then((response) {
-          return response.topics.firstWhere((_) => _.topicName == name);
-        });
-      }
-
-      _brokers = responseFuture.then((response) => response.brokers);
+      MetadataResponse response = await _sendMetadataRequest(topicsToFetch.toSet(), contactPoint.host, contactPoint.port);
+      response.topics.forEach((topic) {
+        if (topicNames.contains(topic.topicName)) {
+          _topicsMetadata[topic.topicName] = topic;
+        }
+      });
+      _brokers = response.brokers;
     }
-    List<TopicMetadata> allMetadata = await Future.wait(_topicsMetadata.values);
-    var metadata = allMetadata.where((_) => topicNames.contains(_.topicName));
-    var brokers = await _brokers;
+    List<TopicMetadata> metadata = List.unmodifiable([for(var name in topicNames) _topicsMetadata[name] ?? null].whereType<TopicMetadata>());
 
-    return ClusterMetadata(brokers!, List.unmodifiable(metadata));
+    return ClusterMetadata(_brokers ?? [], metadata);
   }
 
   Future<MetadataResponse> _sendMetadataRequest(Set<String> topics, String host, int port) async {
@@ -171,6 +168,17 @@ class KafkaSession {
       });
     });
 
+    completer.future.timeout(Duration(seconds: 30)).catchError((error) {
+      if (!completer.isCompleted) {
+        completer.completeError(error);
+        _inflightRequests.remove(request);
+      }
+    }, test: (e) => e is TimeoutException);
+
+    completer.future.catchError((error) {
+      socket.close();
+    });
+
     return completer.future;
   }
 
@@ -186,10 +194,10 @@ class KafkaSession {
   }
 
   void _handleData(String hostPort, List<int> d) {
-    var buffer = _buffers[hostPort];
+    var buffer = _buffers[hostPort]!;
 
-    buffer?.addAll(d);
-    if (buffer!.length >= 4 && _sizes[hostPort] == -1) {
+    buffer.addAll(d);
+    if (buffer.length >= 4 && _sizes[hostPort] == -1) {
       var sizeBytes = buffer.sublist(0, 4);
       var reader = new KafkaBytesReader.fromBytes(sizeBytes);
       _sizes[hostPort] = reader.readInt32();
@@ -238,6 +246,12 @@ class KafkaSession {
         _sizes[key] = -1;
         _subscriptions[key] = socket.listen((d) => _handleData(key, d));
         _flushFutures[socket] = new Future.value();
+        socket.done.whenComplete(() {
+          _sockets.remove(key);
+          socket.destroy();
+          _subscriptions.remove(key)?.cancel();
+          _flushFutures.remove(socket);
+        });
       }, onError: (error) {
         _sockets.remove(key);
       });
